@@ -2,11 +2,9 @@
 
 [中文 README](README.md)
 
-The community edition of YoloWebAgent: a local, single-user YOLO dataset workspace for a lightweight end-to-end workflow covering image/video-frame import, manual annotation, data validation, YOLO/COCO exchange, local training, native YOLO evaluation, and managed model artifacts, with an assistant grounded in tool evidence.
+YoloWebAgentStarter is a local, single-user YOLO dataset workspace for a lightweight end-to-end workflow covering image/video-frame import, manual annotation, data validation, YOLO/COCO exchange, local training, native YOLO evaluation, and managed model artifacts, with an assistant grounded in tool evidence.
 
-```text
-Images → Dataset → Annotations → Validation → YOLO Import / Export → Local Training → Managed PT → Split Evaluation / FP32 ONNX
-```
+A commercial edition is also available. For details, use the contact information below; the official website link will be added later.
 
 ## Why use it
 
@@ -17,7 +15,7 @@ Images → Dataset → Annotations → Validation → YOLO Import / Export → L
 - Train on CPU, MPS, one CUDA GPU, or multiple CUDA GPUs; local multi-GPU training uses Ultralytics DDP.
 - View and filter local backend logs by tail length, level, and content; language preference is stored locally in the browser.
 - Admit only managed `best.pt`, `last.pt`, and static FP32 ONNX training artifacts into the model library.
-- Run upstream-compatible Ultralytics `val` in the background for managed PT models, retaining native metrics, logs, charts, and up to 200 reviewable error samples.
+- Run native Ultralytics `val` in the background for managed PT models, retaining metrics, logs, charts, and up to 200 reviewable error samples.
 - Start local auto-annotation jobs from a dataset card: by default, existing annotations are skipped; select a compatible managed PT model, explicitly confirm class mapping, adjust confidence/IoU, optionally clear old annotations, monitor progress, and cancel when needed. Training and auto-annotation are mutually exclusive on the same machine. Results are retained with the `auto` source and must be manually reviewed before training.
 - Agent MVP: four built-in assistant profiles for general, dataset, training, and model questions, with readiness, failure-diagnosis, and model-comparability reports. Write actions submit existing managed jobs after human confirmation. Sessions retain object bindings; runs support asynchronous progress, cancellation, and retries with their original mode and permissions. See the [Agent guide](docs/agent.md).
 - Load long conversations on demand, search sessions, inspect per-turn evidence and approval records, and see new-reply notifications while reading history.
@@ -49,6 +47,115 @@ Images → Dataset → Annotations → Validation → YOLO Import / Export → L
 | `classify` | One class per image | Standard `split/class/image` layout | Supported | Top-1 / top-5 metrics |
 
 Not included: login/RBAC, collaboration, Workflow, unattended Agent automation (schedules, triggers, automatic job chaining), text-prompt segmentation, Deployment, pose, cloud training, or remote distributed scheduling. The Agent must not execute arbitrary paths, external PT files, or shell commands. Auto-annotation only supports locally managed Ultralytics PT models, and its results require manual review. See the complete boundary in the [Community v2 feature matrix](phase1_scope.md).
+
+## Architecture
+
+### Application layers and storage
+
+The React frontend accesses FastAPI through API adapters. HTTP routes delegate to domain services. Local jobs use queues or background runners, and file access goes through managed-storage boundaries.
+
+```mermaid
+flowchart LR
+    UI["React + TypeScript<br/>Datasets / Annotation / Training / Models / Agent"]
+
+    subgraph Starter["Local Starter backend"]
+        direction LR
+        API["FastAPI HTTP routes"]
+        Domain["Domain services<br/>Datasets / Annotation / Training / Models"]
+        Agent["Agent Service<br/>Profiles / Tool policies / Human approval"]
+        Jobs["Local queues and background runners<br/>Training / Evaluation / Auto-annotation / Video import"]
+        Settings["Settings Service"]
+        DB[("SQLite<br/>Business data / Sessions / Runs and approvals")]
+        Storage["Storage and domain file boundaries<br/>Images / Weights / Exports / Logs"]
+        Config["settings.json<br/>SAM / LLM configuration"]
+
+        API --> Domain
+        API --> Agent
+        API --> Settings
+        Agent -->|Controlled tool calls| Domain
+        Agent -->|Read configuration| Settings
+        Domain --> Jobs
+        Domain --> DB
+        Domain --> Storage
+        Jobs --> DB
+        Jobs --> Storage
+        Agent --> DB
+        Settings --> Config
+    end
+
+    UI -->|Frontend API adapters| API
+    Agent -.->|When LLM is enabled| LLM["Chat Completions compatible service<br/>Local or remote"]
+```
+
+The Agent defaults to built-in Mock / rule planning. All four profiles share the executor. The settings service stores LLM configuration in `settings.json`; sessions and run records reside in SQLite. Starter runs independently.
+
+### Dataset-to-model data flow
+
+Annotations are persisted in absolute pixels. Validation, YOLO export, and evaluation reuse the same persisted image splits. Model versions originate from managed local-training artifacts.
+
+```mermaid
+flowchart LR
+    Import["Images / Video frames<br/>YOLO / COCO import"] --> Dataset["Dataset and manual annotations"]
+    Dataset --> Validate["Data validation"]
+    Validate --> Export["YOLO export"]
+    Export --> Train["Local training queue"]
+    Train --> PT["Managed PT<br/>best.pt / last.pt"]
+    PT --> Eval["Native YOLO val<br/>Metrics / Charts / Error samples"]
+    PT --> ONNX["Static FP32 ONNX"]
+    Dataset --> Split["Persisted image splits"]
+    Split -.-> Validate
+    Split -.-> Export
+    Split -.-> Eval
+```
+
+Each stage is user-initiated. Auto-annotation also uses managed PT models; results retain the `auto` source and require manual review before training.
+
+### Agent queries and human approval
+
+The Agent binds the profile, objects, and run permissions before exposing tools to the provider. Read tools gather business evidence. Write tools create approval requests, and existing jobs are submitted after human confirmation.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as Agent page
+    participant Agent as Agent Service / Executor
+    participant Provider as LLM or Mock Provider
+    participant Domain as Existing domain services
+
+    User->>UI: Choose profile and objects, ask a question
+    UI->>Agent: Submit message and read-only permission
+    Agent-->>UI: 202, return queued run
+    Note over Agent: Persist sessions, runs, tool calls, and approvals in SQLite
+    Agent->>Provider: Bounded history, object context, and allowed tools
+    Provider-->>Agent: Answer or tool-call requests
+    Agent->>Agent: Validate profile, read-only permission, and object scope
+
+    alt Read tool
+        Agent->>Domain: Query or validate
+        Domain-->>Agent: Business evidence
+        Agent->>Provider: Tool results
+        Provider-->>Agent: Evidence-based answer
+        UI->>Agent: Poll current run
+        Agent-->>UI: Answer, tool evidence, and inference records
+    else Write proposal
+        Note over Agent: Persist pending approval
+        UI->>Agent: Poll current run
+        Agent-->>UI: Preview objects, parameters, and expected outputs
+        User->>UI: Review and confirm or reject
+        alt Confirm
+            UI->>Agent: Confirm approval with optional parameter changes
+            Agent->>Agent: Recheck policy, parameters, expiry, and execution state
+            Agent->>Domain: Submit training / evaluation / auto-annotation job
+            Domain-->>Agent: Managed job ID
+            Agent-->>UI: Job ID and approval result, end turn
+        else Reject
+            UI->>Agent: Reject approval
+            Agent-->>UI: Record rejection and end turn
+        end
+    end
+```
+
+Submitted jobs are monitored and controlled from their respective job pages. See the [Agent guide](docs/agent.md) for run behavior, cancellation, retries, and history pagination.
 
 ## Quick start
 
@@ -197,7 +304,7 @@ This is local, single-user software. It does not provide authentication, authori
 
 ## Evaluation implementation and artifacts
 
-Evaluation accepts only managed Ultralytics PT models registered by Starter training jobs. An HTTP route creates the job and returns immediately; the local background runner then executes the same native `val` contract as upstream:
+Evaluation accepts only managed Ultralytics PT models registered by Starter training jobs. An HTTP route creates the job and returns immediately; the local background runner then executes native `val`:
 
 ```text
 yolo <detect|segment|obb|classify> val ... plots=True save_json=True exist_ok=True
@@ -211,11 +318,9 @@ yolo <detect|segment|obb|classify> val ... plots=True save_json=True exist_ok=Tr
 
 Charts appear only when Ultralytics actually generates them. For example, a tiny random model with no valid true positives may not create PR curves, while still producing metrics, logs, a confusion matrix, and prediction JSON.
 
-## Upstream alignment and standalone operation
+## License and provenance
 
-The fixed Community v2 alignment baseline is YoloWebAgent commit `701f6e5a63b73f39e35f48fb6de7d2414401875a`. The evaluation runner, artifact manager, error-sample analyzer, and details panel retain upstream module boundaries while being trimmed to detect, segment, OBB, and classify. The Ultralytics 8.4.115 filename and JSON adapters are compatibility extensions to that upstream contract.
-
-At runtime, Starter never imports, reads, or depends on the YoloWebAgent/Enterprise repository, and it does not include its Auth, RBAC, License, Workflow, unattended Agent automation, evaluation-automation callback, Deployment, or pose modules. The Community Agent MVP is a local read-only assistant with human-confirmed job submission; it does not migrate the Enterprise Agent/Workflow stack.
+See [LICENSE](LICENSE), [NOTICE](NOTICE), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for licensing, provenance, and third-party dependency notices.
 
 ## Project layout
 
@@ -227,7 +332,7 @@ docs/              Quick start, Agent guide, dependency audit, and source/proven
 data/              Default runtime directory (ignored; do not commit)
 ```
 
-Backend routes only adapt HTTP. Dataset, annotation, training, and file access are handled by domain services and managed-storage boundaries. Starter does not import, read, or depend on upstream/Enterprise repositories at runtime.
+Backend routes only adapt HTTP. Dataset, annotation, training, and file access are handled by domain services and managed-storage boundaries.
 
 ## Development and verification
 
@@ -240,19 +345,24 @@ npm --prefix frontend run build
 PYTHONPATH=backend .venv/bin/python scripts/run_cpu_smoke.py
 ```
 
-The standard tests directly invoke the Ultralytics 8.4.115 detect, segment, and OBB validators to generate the real JSON contract, then validate it with the error-sample analyzer. The CPU smoke test actually runs one tiny training epoch for all four tasks, reuses upstream native parameters to run segment `val(save_json=True, plots=True)`, and verifies eight box/mask metrics, pycocotools RLE, the confusion matrix, prediction JSON, and detect ONNX export. The smoke test uses temporary directories and retains neither models nor datasets. The first run may wait for the Matplotlib font cache and ONNX export.
+The standard tests directly invoke the Ultralytics 8.4.115 detect, segment, and OBB validators to generate the real JSON contract, then validate it with the error-sample analyzer. The CPU smoke test actually runs one tiny training epoch for all four tasks, uses native parameters to run segment `val(save_json=True, plots=True)`, and verifies eight box/mask metrics, pycocotools RLE, the confusion matrix, prediction JSON, and detect ONNX export. The smoke test uses temporary directories and retains neither models nor datasets. The first run may wait for the Matplotlib font cache and ONNX export.
 
 Agent automated tests use the Mock Provider and require no real LLM API key. They cover tool policies, object binding, human approvals, run recovery, and history pagination. Real-provider connectivity and model tool-calling support require separate verification.
 
 Tiny offline random models are not guaranteed to produce valid true positives, so the CPU smoke test does not require PR curves. The Ultralytics 8.4.115 naming contract for `BoxPR_curve.png` / `MaskPR_curve.png` is covered by focused tests. See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md) for details.
 
+## Contact information
+wechat：fengzhizi715
+
+Email：fengzhizi715@126.com
+
 ## Contributing
 
 Contributions are welcome for in-scope bug fixes, tests, documentation, and local single-user experience improvements. Before submitting:
 
-1. Keep functionality within the [Community v2 scope](phase1_scope.md); discuss new task types, authentication, cloud services, or Enterprise workflows first.
+1. Keep functionality within the [Community v2 scope](phase1_scope.md); discuss new task types, authentication, cloud services, or workflow capabilities first.
 2. Add focused tests for behavior changes and run the verification commands above.
 3. Do not commit model weights, datasets, customer materials, credentials, build logs, or absolute paths.
-4. Preserve and update source records; do not introduce upstream/Enterprise runtime dependencies.
+4. Preserve and update source records, and keep the project independently runnable.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution guidelines.
